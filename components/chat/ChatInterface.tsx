@@ -41,7 +41,9 @@ export function ChatInterface() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const streamingTextRef = useRef<HTMLParagraphElement>(null);
+  // 流式生成中已显示的文本。用 state 驱动，使回答在生成过程中就实时渲染 Markdown
+  // （而非等全部生成完再切到 Markdown 视图）
+  const [streamingText, setStreamingText] = useState('');
   // 是否跟随底部自动滚动。用户主动向上滚动查看历史时置为 false，
   // 暂停自动滚动（打字机不会被强制拉回底部）；滚回底部后自动恢复。
   const stickToBottomRef = useRef(true);
@@ -75,6 +77,9 @@ export function ChatInterface() {
     const userMessage: Message = { role: 'user', content: text };
     const assistantMessage: Message = { role: 'assistant', content: '' };
 
+    // 用户主动发送新消息 → 先恢复"跟随底部"，再更新消息，
+    // 保证渲染后的滚动 effect 一定生效（否则若之前向上滚过会停在原地看不到新回答）
+    stickToBottomRef.current = true;
     flushSync(() => {
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setInput('');
@@ -82,11 +87,16 @@ export function ChatInterface() {
       setError(null);
     });
 
-    // 用户主动发送新消息 → 恢复跟随底部，让新回答可见
-    stickToBottomRef.current = true;
+    // 双保险：强制滚动到底部，让新问题与回答立即可见
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    });
 
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // 提升作用域，便于停止/报错时清理打字机 interval，避免泄漏
+    let typewriter: number | null = null;
 
     try {
       const response = await fetch('/api/chat', {
@@ -136,11 +146,14 @@ export function ChatInterface() {
       let displayedLen = 0;
       let streamDone = false;
 
-      const typewriter = setInterval(() => {
+      // 打字机：间隔稍放宽（约 20 帧/秒），每次用 state 更新已显示文本，
+      // 让 react-markdown 在生成过程中就实时渲染（表格、列表、代码块等）
+      typewriter = window.setInterval(() => {
         if (displayedLen >= fullText.length) {
           if (streamDone) {
-            clearInterval(typewriter);
+            if (typewriter !== null) window.clearInterval(typewriter);
             flushSync(() => {
+              setStreamingText('');
               setMessages((prev) => {
                 const updated = [...prev];
                 updated[updated.length - 1] = {
@@ -157,16 +170,15 @@ export function ChatInterface() {
           return;
         }
 
-        displayedLen = Math.min(fullText.length, displayedLen + 2);
+        displayedLen = Math.min(fullText.length, displayedLen + 6);
 
-        if (streamingTextRef.current) {
-          streamingTextRef.current.textContent = fullText.substring(0, displayedLen);
-          // 仅当用户停留在底部附近时才跟随滚动，避免打断用户向上翻看
-          if (stickToBottomRef.current) {
-            messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-          }
+        // 仅当用户停留在底部附近时才跟随滚动，避免打断用户向上翻看
+        if (stickToBottomRef.current) {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
         }
-      }, 16);
+
+        setStreamingText(fullText.substring(0, displayedLen));
+      }, 50);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -187,6 +199,9 @@ export function ChatInterface() {
 
       streamDone = true;
     } catch (err) {
+      // 停止或报错时清理打字机 interval，并清空流式文本
+      if (typewriter !== null) window.clearInterval(typewriter);
+      setStreamingText('');
       if (err instanceof DOMException && err.name === 'AbortError') {
         // user cancelled
       } else {
@@ -289,10 +304,8 @@ export function ChatInterface() {
                     {message.role === 'user' ? (
                       <p className="whitespace-pre-wrap text-sm">{message.content}</p>
                     ) : isStreaming ? (
-                      <p
-                        ref={streamingTextRef}
-                        className="whitespace-pre-wrap text-sm typing-cursor"
-                      />
+                      // 生成中即渲染 Markdown（表格/列表/代码块实时成形），并带打字光标
+                      <MessageRenderer content={streamingText} streaming />
                     ) : (
                       <>
                         <MessageRenderer content={message.content} />
