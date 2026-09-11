@@ -41,3 +41,7 @@ next-env.d.ts
 
 # 调试日志
 /debug.log
+
+# TRAE 工具产物与交付文档
+/.trae-html-share-packages/
+/换电脑快速上手/
