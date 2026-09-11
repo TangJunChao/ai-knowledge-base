@@ -1,0 +1,57 @@
+# ==============================================
+# 知识库问答系统 - 一键启动（Docker Compose）
+#
+# 用法：
+#   1. 安装 Docker Desktop 并启动
+#   2. 复制 .env.example 为 .env，填入 DeepSeek API Key
+#   3. 运行: docker compose up -d --build
+#   4. 浏览器打开 http://localhost:3000
+#
+# 停止: docker compose down
+# 停止并删除数据: docker compose down -v
+# ==============================================
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: ai-kb-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_knowledge_base
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_knowledge_base"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    container_name: ai-kb-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # 容器内数据库地址（db 是 compose 服务名）
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/ai_knowledge_base
+      # DeepSeek API（从 .env 读取，使用者只需改 .env）
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?请先在 .env 中配置 OPENAI_API_KEY}
+      OPENAI_BASE_URL: https://api.deepseek.com/v1
+      CHAT_MODEL: deepseek-chat
+      # Embedding 模型镜像（首次构建时下载）
+      HF_ENDPOINT: https://hf-mirror.com
+      # RAG 配置
+      CHUNK_SIZE: "800"
+      CHUNK_OVERLAP: "200"
+      TOP_K: "15"
+      KEYWORD_TOP_K: "30"
+      MAX_CONTEXT_CHUNKS: "30"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

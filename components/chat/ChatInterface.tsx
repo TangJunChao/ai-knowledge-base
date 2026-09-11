@@ -1,0 +1,383 @@
+'use client';
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { flushSync } from 'react-dom';
+import { MessageRenderer } from './MessageRenderer';
+import { SourceCard } from './SourceCard';
+import { StatChart, type StatChartData } from './StatChart';
+
+interface Source {
+  title: string;
+  similarity: number;
+}
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: Source[];
+  statData?: StatChartData;
+}
+
+function parseDataLine(line: string): { type: string; value: string } | null {
+  if (!line) return null;
+  const colonIndex = line.indexOf(':');
+  if (colonIndex === -1) return null;
+  const type = line.substring(0, colonIndex);
+  const valueStr = line.substring(colonIndex + 1);
+  try {
+    const value = JSON.parse(valueStr);
+    return { type, value };
+  } catch {
+    return null;
+  }
+}
+
+export function ChatInterface() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const streamingTextRef = useRef<HTMLParagraphElement>(null);
+  // 是否跟随底部自动滚动。用户主动向上滚动查看历史时置为 false，
+  // 暂停自动滚动（打字机不会被强制拉回底部）；滚回底部后自动恢复。
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    // 仅在用户停留在底部附近时自动滚动到底部
+    if (stickToBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
+
+  /** 跟踪用户滚动位置：离开底部（向上翻看）则暂停自动滚动 */
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 60;
+  }, []);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height =
+        Math.min(textareaRef.current.scrollHeight, 200) + 'px';
+    }
+  }, [input]);
+
+  const sendMessage = useCallback(async (text: string) => {
+    if (!text.trim() || isLoading) return;
+
+    const userMessage: Message = { role: 'user', content: text };
+    const assistantMessage: Message = { role: 'assistant', content: '' };
+
+    flushSync(() => {
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      setInput('');
+      setIsLoading(true);
+      setError(null);
+    });
+
+    // 用户主动发送新消息 → 恢复跟随底部，让新回答可见
+    stickToBottomRef.current = true;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [...messages, userMessage].map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+      }
+
+      const sourcesHeader = response.headers.get('X-Search-Results');
+      let sources: Source[] = [];
+      if (sourcesHeader) {
+        try {
+          sources = JSON.parse(decodeURIComponent(sourcesHeader));
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      // 统计问答的图表数据（结构化分组数据，用于渲染柱状图/折线图）
+      const statDataHeader = response.headers.get('X-Stat-Data');
+      let statData: StatChartData | undefined;
+      if (statDataHeader) {
+        try {
+          statData = JSON.parse(decodeURIComponent(statDataHeader));
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+      let displayedLen = 0;
+      let streamDone = false;
+
+      const typewriter = setInterval(() => {
+        if (displayedLen >= fullText.length) {
+          if (streamDone) {
+            clearInterval(typewriter);
+            flushSync(() => {
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...updated[updated.length - 1],
+                  content: fullText,
+                  sources: sources.length > 0 ? sources : undefined,
+                  statData,
+                };
+                return updated;
+              });
+              setIsLoading(false);
+            });
+          }
+          return;
+        }
+
+        displayedLen = Math.min(fullText.length, displayedLen + 2);
+
+        if (streamingTextRef.current) {
+          streamingTextRef.current.textContent = fullText.substring(0, displayedLen);
+          // 仅当用户停留在底部附近时才跟随滚动，避免打断用户向上翻看
+          if (stickToBottomRef.current) {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+          }
+        }
+      }, 16);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line) continue;
+          const parsed = parseDataLine(line);
+          if (parsed && parsed.type === '0') {
+            fullText += parsed.value;
+          }
+        }
+      }
+
+      streamDone = true;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        // user cancelled
+      } else {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+      flushSync(() => setIsLoading(false));
+    }
+    abortRef.current = null;
+  }, [messages, isLoading]);
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (input.trim() && !isLoading) {
+          sendMessage(input);
+        }
+      }
+    },
+    [input, isLoading, sendMessage]
+  );
+
+  const handleSubmit = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      if (input.trim() && !isLoading) {
+        sendMessage(input);
+      }
+    },
+    [input, isLoading, sendMessage]
+  );
+
+  const handleCopy = useCallback((text: string) => {
+    navigator.clipboard.writeText(text);
+  }, []);
+
+  return (
+    <div className="flex flex-col h-[calc(100vh-3.5rem)]">
+      <div className="flex-1 overflow-y-auto" ref={scrollRef} onScroll={handleScroll}>
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-center py-20">
+              <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
+                <svg className="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-4l-4 4v-4z" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-semibold mb-2">知识库问答</h2>
+              <p className="text-sm text-muted max-w-md">
+                基于已上传的文档进行问答。系统会自动检索相关内容并生成回答，同时标注引用来源。
+              </p>
+              <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-md">
+                {[
+                  '这个文档的核心观点是什么？',
+                  '总结主要内容的要点',
+                  '有哪些关键结论？',
+                  '请列出文档中的关键数据',
+                ].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => sendMessage(q)}
+                    className="text-left p-3 rounded-xl border border-border bg-surface hover:border-primary hover:bg-surface-hover transition-all text-sm"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {messages.map((message, i) => {
+            const isStreaming = isLoading && i === messages.length - 1;
+            return (
+              <div
+                key={i}
+                className={`flex gap-3 mb-6 animate-fade-in ${
+                  message.role === 'user' ? 'flex-row-reverse' : ''
+                }`}
+              >
+                <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-sm font-medium ${
+                  message.role === 'user'
+                    ? 'bg-foreground text-background'
+                    : 'bg-primary text-white'
+                }`}>
+                  {message.role === 'user' ? '我' : 'AI'}
+                </div>
+
+                <div className={`flex-1 min-w-0 ${message.role === 'user' ? 'flex flex-col items-end' : ''}`}>
+                  <div
+                    className={`inline-block max-w-full rounded-2xl px-4 py-3 ${
+                      message.role === 'user'
+                        ? 'bg-primary text-white'
+                        : 'bg-surface border border-border'
+                    }`}
+                  >
+                    {message.role === 'user' ? (
+                      <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                    ) : isStreaming ? (
+                      <p
+                        ref={streamingTextRef}
+                        className="whitespace-pre-wrap text-sm typing-cursor"
+                      />
+                    ) : (
+                      <>
+                        <MessageRenderer content={message.content} />
+                        {message.statData && <StatChart data={message.statData} />}
+                        {message.sources && <SourceCard sources={message.sources} />}
+                      </>
+                    )}
+                  </div>
+
+                  {message.role === 'assistant' && !isLoading && (
+                    <div className="flex items-center gap-1 mt-1.5">
+                      <button
+                        onClick={() => handleCopy(message.content)}
+                        className="p-1.5 rounded-lg hover:bg-surface-hover text-muted hover:text-foreground transition-colors"
+                        title="复制"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {error && (
+            <div className="flex items-center gap-2 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm mb-6">
+              <svg className="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>请求失败: {error.message}</span>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      <div className="border-t border-border bg-surface">
+        <div className="max-w-3xl mx-auto px-4 py-3">
+          <form onSubmit={handleSubmit} className="flex items-end gap-2">
+            <div className="flex-1 relative">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="基于知识库提问... (Enter 发送, Shift+Enter 换行)"
+                rows={1}
+                disabled={isLoading}
+                className="w-full resize-none rounded-2xl border border-border bg-background px-4 py-3 text-sm placeholder:text-muted focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-all disabled:opacity-60"
+                style={{ maxHeight: '200px' }}
+              />
+            </div>
+            {isLoading ? (
+              <button
+                type="button"
+                onClick={stop}
+                className="flex-shrink-0 w-10 h-10 rounded-xl bg-red-500 text-white flex items-center justify-center hover:bg-red-600 transition-colors"
+                title="停止生成"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim()}
+                className="flex-shrink-0 w-10 h-10 rounded-xl bg-primary text-white flex items-center justify-center hover:bg-primary-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="发送"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+              </button>
+            )}
+          </form>
+          <div className="text-xs text-muted text-center mt-2">
+            AI 回答基于知识库内容，仅供参考。请始终验证重要信息。
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
