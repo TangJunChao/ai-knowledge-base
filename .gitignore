@@ -45,3 +45,7 @@ next-env.d.ts
 # TRAE 工具产物与交付文档
 /.trae-html-share-packages/
 /换电脑快速上手/
+
+# 数据导出产物（非代码，不入库）
+/documents_导出.csv
+/table_data_结构化数据.html

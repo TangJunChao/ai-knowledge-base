@@ -13,6 +13,7 @@ import {
   statsStream,
   latestStream,
   saveChatRecord,
+  autoTitleConversation,
   getDocumentTableData,
   getTableDocuments,
   rewriteQueryWithHistory,
@@ -35,7 +36,10 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { messages } = body as { messages: { role: string; content: string }[] };
+    const { messages, conversationId } = body as {
+      messages: { role: string; content: string }[];
+      conversationId?: string | null;
+    };
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return Response.json({ error: '消息不能为空' }, { status: 400 });
@@ -47,6 +51,11 @@ export async function POST(req: Request) {
     }
 
     const question = lastMessage.content;
+
+    // 若会话标题仍是默认"新对话"，用首条问题自动命名
+    if (conversationId) {
+      autoTitleConversation(conversationId, question).catch(console.error);
+    }
 
     // ===== 多轮追问：查询改写 =====
     // 当存在对话历史时，把追问（如"那2026年呢？"）结合历史改写成独立完整的查询，
@@ -76,7 +85,7 @@ export async function POST(req: Request) {
         });
         result.text
           .then((text) => {
-            saveChatRecord(question, text, sources).catch(console.error);
+            saveChatRecord(conversationId ?? null, question, text, sources).catch(console.error);
           })
           .catch(console.error);
         return response;
@@ -100,7 +109,7 @@ export async function POST(req: Request) {
         });
         result.text
           .then((text) => {
-            saveChatRecord(question, text, sources, chart).catch(console.error);
+            saveChatRecord(conversationId ?? null, question, text, sources, chart).catch(console.error);
           })
           .catch(console.error);
         return response;
@@ -132,7 +141,7 @@ export async function POST(req: Request) {
 
     result.text
       .then((text) => {
-        saveChatRecord(question, text, sources).catch(console.error);
+        saveChatRecord(conversationId ?? null, question, text, sources).catch(console.error);
       })
       .catch(console.error);
 

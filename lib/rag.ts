@@ -523,7 +523,7 @@ export async function getTableDocuments(): Promise<
  */
 export async function getChatHistory(limit: number = 20): Promise<any[]> {
   return query(
-    `SELECT id, question, answer, sources, stat_data, created_at
+    `SELECT id, conversation_id, question, answer, sources, stat_data, created_at
      FROM chat_history
      ORDER BY created_at DESC
      LIMIT $1`,
@@ -533,19 +533,34 @@ export async function getChatHistory(limit: number = 20): Promise<any[]> {
 
 /**
  * 保存对话记录
+ * @param conversationId 所属会话 ID（多会话；为空则不入库会话关联）
  * @param statData 统计问答的图表数据（可选，仅统计分支传入）
  */
 export async function saveChatRecord(
+  conversationId: string | null,
   question: string,
   answer: string,
   sources: { title: string; similarity: number }[],
   statData?: unknown
 ): Promise<void> {
   await query(
-    `INSERT INTO chat_history (question, answer, sources, stat_data)
-     VALUES ($1, $2, $3::jsonb, $4::jsonb)`,
-    [question, answer, JSON.stringify(sources), statData ? JSON.stringify(statData) : null]
+    `INSERT INTO chat_history (conversation_id, question, answer, sources, stat_data)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
+    [
+      conversationId,
+      question,
+      answer,
+      JSON.stringify(sources),
+      statData ? JSON.stringify(statData) : null,
+    ]
   );
+  // 更新会话的"最后活动时间"（会话列表按此倒序）
+  if (conversationId) {
+    await query(
+      `UPDATE conversations SET updated_at = NOW() WHERE id = $1`,
+      [conversationId]
+    );
+  }
 }
 
 /**
@@ -560,4 +575,130 @@ export async function deleteChatHistory(id: string): Promise<void> {
  */
 export async function clearAllChatHistory(): Promise<void> {
   await query(`DELETE FROM chat_history`);
+}
+
+/* ==================== 多会话管理 ==================== */
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  message_count: number;
+  last_message_at: string;
+  last_question: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  question: string;
+  answer: string;
+  sources: { title: string; similarity: number }[];
+  stat_data: unknown;
+  created_at: string;
+}
+
+/**
+ * 会话列表（按最后活动时间倒序），含消息数与最后一条问题预览
+ */
+export async function listConversations(): Promise<ConversationSummary[]> {
+  return query<ConversationSummary>(
+    `SELECT
+       c.id,
+       c.title,
+       COUNT(h.id)::int AS message_count,
+       MAX(h.created_at) AS last_message_at,
+       (SELECT h2.question FROM chat_history h2 WHERE h2.conversation_id = c.id ORDER BY h2.created_at DESC LIMIT 1) AS last_question,
+       c.created_at,
+       c.updated_at
+     FROM conversations c
+     LEFT JOIN chat_history h ON h.conversation_id = c.id
+     GROUP BY c.id
+     ORDER BY COALESCE(MAX(h.created_at), c.created_at) DESC`
+  );
+}
+
+/**
+ * 新建会话
+ */
+export async function createConversation(title?: string): Promise<ConversationSummary> {
+  const rows = await query<ConversationSummary>(
+    `INSERT INTO conversations (title) VALUES ($1)
+     RETURNING id, title, 0::int AS message_count, created_at, updated_at,
+               NULL::timestamptz AS last_message_at, NULL::text AS last_question`,
+    [title?.trim() || '新对话']
+  );
+  return rows[0];
+}
+
+/**
+ * 会话详情：基本信息 + 全部消息（按时间正序，便于直接渲染对话流）
+ */
+export async function getConversationWithMessages(
+  conversationId: string
+): Promise<{ conversation: ConversationSummary | null; messages: ConversationMessage[] } | null> {
+  const convRows = await query<ConversationSummary>(
+    `SELECT
+       c.id,
+       c.title,
+       COUNT(h.id)::int AS message_count,
+       MAX(h.created_at) AS last_message_at,
+       (SELECT h2.question FROM chat_history h2 WHERE h2.conversation_id = c.id ORDER BY h2.created_at DESC LIMIT 1) AS last_question,
+       c.created_at,
+       c.updated_at
+     FROM conversations c
+     LEFT JOIN chat_history h ON h.conversation_id = c.id
+     WHERE c.id = $1
+     GROUP BY c.id`,
+    [conversationId]
+  );
+  if (convRows.length === 0) return null;
+
+  const msgRows = await query<ConversationMessage>(
+    `SELECT id, question, answer, sources, stat_data, created_at
+     FROM chat_history
+     WHERE conversation_id = $1
+     ORDER BY created_at ASC`,
+    [conversationId]
+  );
+
+  return { conversation: convRows[0], messages: msgRows };
+}
+
+/**
+ * 删除会话（级联删除其下所有消息）
+ */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  await query(`DELETE FROM conversations WHERE id = $1`, [conversationId]);
+}
+
+/**
+ * 重命名会话
+ */
+export async function renameConversation(
+  conversationId: string,
+  title: string
+): Promise<void> {
+  await query(`UPDATE conversations SET title = $2 WHERE id = $1`, [
+    conversationId,
+    title.trim() || '新对话',
+  ]);
+}
+
+/**
+ * 会话第一条消息产生后，用问题自动命名（仅当标题仍为默认"新对话"时）
+ * @returns 是否执行了命名
+ */
+export async function autoTitleConversation(
+  conversationId: string,
+  question: string
+): Promise<boolean> {
+  const rows = await query<{ is_default: boolean }>(
+    `SELECT (title = '新对话' OR title = '') AS is_default FROM conversations WHERE id = $1`,
+    [conversationId]
+  );
+  if (rows.length === 0 || !rows[0].is_default) return false;
+  const title = question.replace(/\s+/g, ' ').trim().slice(0, 30);
+  await renameConversation(conversationId, title || '新对话');
+  return true;
 }

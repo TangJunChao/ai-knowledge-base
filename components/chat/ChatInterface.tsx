@@ -11,11 +11,20 @@ interface Source {
   similarity: number;
 }
 
-interface Message {
+export interface Message {
   role: 'user' | 'assistant';
   content: string;
   sources?: Source[];
   statData?: StatChartData;
+}
+
+interface ChatInterfaceProps {
+  /** 当前会话 ID（null 表示尚未创建会话） */
+  conversationId: string | null;
+  /** 当前会话的消息列表（受控，由父组件管理） */
+  messages: Message[];
+  /** 消息变化回调 */
+  onMessagesChange: (messages: Message[]) => void;
 }
 
 function parseDataLine(line: string): { type: string; value: string } | null {
@@ -32,8 +41,11 @@ function parseDataLine(line: string): { type: string; value: string } | null {
   }
 }
 
-export function ChatInterface() {
-  const [messages, setMessages] = useState<Message[]>([]);
+export function ChatInterface({
+  conversationId,
+  messages,
+  onMessagesChange,
+}: ChatInterfaceProps) {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -81,7 +93,7 @@ export function ChatInterface() {
     // 保证渲染后的滚动 effect 一定生效（否则若之前向上滚过会停在原地看不到新回答）
     stickToBottomRef.current = true;
     flushSync(() => {
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      onMessagesChange([...messages, userMessage, assistantMessage]);
       setInput('');
       setIsLoading(true);
       setError(null);
@@ -107,6 +119,7 @@ export function ChatInterface() {
             role: m.role,
             content: m.content,
           })),
+          conversationId,
         }),
         signal: controller.signal,
       });
@@ -154,16 +167,18 @@ export function ChatInterface() {
             if (typewriter !== null) window.clearInterval(typewriter);
             flushSync(() => {
               setStreamingText('');
-              setMessages((prev) => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  content: fullText,
-                  sources: sources.length > 0 ? sources : undefined,
-                  statData,
-                };
-                return updated;
-              });
+              onMessagesChange(
+                (() => {
+                  const updated = [...messages];
+                  updated[updated.length - 1] = {
+                    ...updated[updated.length - 1],
+                    content: fullText,
+                    sources: sources.length > 0 ? sources : undefined,
+                    statData,
+                  };
+                  return updated;
+                })()
+              );
               setIsLoading(false);
             });
           }
@@ -210,7 +225,7 @@ export function ChatInterface() {
       flushSync(() => setIsLoading(false));
     }
     abortRef.current = null;
-  }, [messages, isLoading]);
+  }, [conversationId, messages, isLoading, onMessagesChange]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();

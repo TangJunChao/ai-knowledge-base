@@ -19,6 +19,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- 删除旧表（如需保留数据请注释掉）
 DROP TABLE IF EXISTS chat_history CASCADE;
+DROP TABLE IF EXISTS conversations CASCADE;
 DROP TABLE IF EXISTS document_chunks CASCADE;
 DROP TABLE IF EXISTS documents CASCADE;
 
@@ -46,9 +47,18 @@ CREATE TABLE document_chunks (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 对话历史表
+-- 会话表（多会话管理）
+CREATE TABLE conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(200) NOT NULL DEFAULT '新对话',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 对话历史表（归属会话）
 CREATE TABLE chat_history (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
   answer TEXT NOT NULL,
   sources JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -72,6 +82,14 @@ CREATE INDEX documents_created_at_idx
 -- 对话历史创建时间索引
 CREATE INDEX chat_history_created_at_idx
   ON chat_history(created_at DESC);
+
+-- 会话更新时间索引
+CREATE INDEX conversations_updated_at_idx
+  ON conversations(updated_at DESC);
+
+-- 历史记录按会话查询索引
+CREATE INDEX chat_history_conversation_id_idx
+  ON chat_history(conversation_id, created_at);
 `;
 
 async function migrate() {

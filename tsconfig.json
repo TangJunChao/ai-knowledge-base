@@ -23,5 +23,12 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    ".next",
+    ".models",
+    ".npm-cache",
+    "知识库问答系统-交付版",
+    "换电脑快速上手"
+  ]
 }
