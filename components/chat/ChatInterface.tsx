@@ -5,6 +5,7 @@ import { flushSync } from 'react-dom';
 import { MessageRenderer } from './MessageRenderer';
 import { SourceCard } from './SourceCard';
 import { StatChart, type StatChartData } from './StatChart';
+import { MessageActions } from './MessageActions';
 
 interface Source {
   title: string;
@@ -253,10 +254,6 @@ export function ChatInterface({
     [input, isLoading, sendMessage]
   );
 
-  const handleCopy = useCallback((text: string) => {
-    navigator.clipboard.writeText(text);
-  }, []);
-
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)]">
       <div className="flex-1 overflow-y-auto" ref={scrollRef} onScroll={handleScroll}>
@@ -331,17 +328,15 @@ export function ChatInterface({
                   </div>
 
                   {message.role === 'assistant' && !isLoading && (
-                    <div className="flex items-center gap-1 mt-1.5">
-                      <button
-                        onClick={() => handleCopy(message.content)}
-                        className="p-1.5 rounded-lg hover:bg-surface-hover text-muted hover:text-foreground transition-colors"
-                        title="复制"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                        </svg>
-                      </button>
-                    </div>
+                    <MessageActions
+                      content={message.content}
+                      question={
+                        i > 0 && messages[i - 1]?.role === 'user'
+                          ? messages[i - 1].content
+                          : undefined
+                      }
+                      className="mt-1.5"
+                    />
                   )}
                 </div>
               </div>

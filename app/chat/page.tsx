@@ -151,6 +151,26 @@ export default function ChatPage() {
     []
   );
 
+  /** 消息变化：更新消息，并把活跃会话移到列表最前（最新对话优先） */
+  const handleMessagesChange = useCallback(
+    (msgs: Message[]) => {
+      const hasNew = msgs.length > messages.length;
+      setMessages(msgs);
+      if (hasNew && activeId) {
+        setConversations((prev) => {
+          const idx = prev.findIndex((c) => c.id === activeId);
+          if (idx < 0) return prev;
+          const item = {
+            ...prev[idx],
+            message_count: prev[idx].message_count + 1,
+          };
+          return [item, ...prev.slice(0, idx), ...prev.slice(idx + 1)];
+        });
+      }
+    },
+    [messages.length, activeId]
+  );
+
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
       <ConversationSidebar
@@ -195,7 +215,7 @@ export default function ChatPage() {
         <ChatInterface
           conversationId={activeId}
           messages={messages}
-          onMessagesChange={setMessages}
+          onMessagesChange={handleMessagesChange}
         />
       </div>
     </div>

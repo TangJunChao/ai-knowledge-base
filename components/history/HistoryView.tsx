@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { MessageRenderer } from '@/components/chat/MessageRenderer';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { StatChart, type StatChartData } from '@/components/chat/StatChart';
+import { MessageActions } from '@/components/chat/MessageActions';
 
 interface ConversationSummary {
   id: string;
@@ -39,6 +40,12 @@ function formatDate(dateStr: string): string {
   if (hours < 24) return `${hours} 小时前`;
   if (days < 7) return `${days} 天前`;
   return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+}
+
+/** 会话内消息的具体时间：M月D日 HH:mm */
+function formatDateTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
 export function HistoryView() {
@@ -357,8 +364,15 @@ export function HistoryView() {
                           </div>
                         ) : expandedDetail ? (
                           <div className="divide-y divide-border/70">
-                            {expandedDetail.messages.map((item) => (
+                            {/* 消息按时间倒序：最新记录置顶 */}
+                            {[...expandedDetail.messages].reverse().map((item) => (
                               <div key={item.id} className="p-4 space-y-3">
+                                <div className="text-xs text-muted flex items-center gap-2">
+                                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
+                                  {formatDateTime(item.created_at)}
+                                </div>
                                 {/* 问题 */}
                                 <div className="flex gap-3">
                                   <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-foreground/5 flex items-center justify-center text-xs font-medium">
@@ -414,6 +428,11 @@ export function HistoryView() {
                                         </div>
                                       </div>
                                     )}
+                                    <MessageActions
+                                      content={item.answer}
+                                      question={item.question}
+                                      className="mt-2"
+                                    />
                                   </div>
                                 </div>
                               </div>
