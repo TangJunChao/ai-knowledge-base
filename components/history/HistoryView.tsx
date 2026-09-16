@@ -431,6 +431,7 @@ export function HistoryView() {
                                     <MessageActions
                                       content={item.answer}
                                       question={item.question}
+                                      statData={item.stat_data}
                                       className="mt-2"
                                     />
                                   </div>

@@ -51,9 +51,18 @@ export function ChatInterface({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 用户主动停止时立即执行的收尾操作（清打字机 + 提交已生成内容 + 结束加载态）。
+  // 由 sendMessage 在流式读取开始时注入，stop 按钮直接调用，确保"停止"即时生效，
+  // 不依赖网络 abort 是否来得及中断（流可能已读取完毕，只剩打字机在慢速输出）。
+  const stopHandlerRef = useRef<(() => void) | null>(null);
+  // 读取循环的停止标志：网络 abort 未生效时，下个数据块到达即退出循环
+  const stoppedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 始终指向最新 messages，供异步回调（流式完成/停止）读取，避免闭包过期覆盖本轮消息
+  const messagesRef = useRef<Message[]>(messages);
+  messagesRef.current = messages;
   // 流式生成中已显示的文本。用 state 驱动，使回答在生成过程中就实时渲染 Markdown
   // （而非等全部生成完再切到 Markdown 视图）
   const [streamingText, setStreamingText] = useState('');
@@ -90,6 +99,11 @@ export function ChatInterface({
     const userMessage: Message = { role: 'user', content: text };
     const assistantMessage: Message = { role: 'assistant', content: '' };
 
+    // 提升作用域：停止生成（AbortError）时也能读取到已累积的文本与来源，避免回答整条丢失
+    let fullText = '';
+    let sources: Source[] = [];
+    let statData: StatChartData | undefined;
+
     // 用户主动发送新消息 → 先恢复"跟随底部"，再更新消息，
     // 保证渲染后的滚动 effect 一定生效（否则若之前向上滚过会停在原地看不到新回答）
     stickToBottomRef.current = true;
@@ -107,9 +121,25 @@ export function ChatInterface({
 
     const controller = new AbortController();
     abortRef.current = controller;
+    stoppedRef.current = false;
 
     // 提升作用域，便于停止/报错时清理打字机 interval，避免泄漏
     let typewriter: number | null = null;
+
+    // 把已生成的完整文本写回最后一条 assistant 消息（流式结束与停止时共用）。
+    // 必须基于 messagesRef 的最新数组：闭包里的 messages 是发送时的旧数组，
+    // 用它写回会把本轮用户问题+回答一并覆盖掉。
+    const commitAnswer = () => {
+      const updated = [...messagesRef.current];
+      if (updated.length === 0) return;
+      updated[updated.length - 1] = {
+        ...updated[updated.length - 1],
+        content: fullText,
+        sources: sources.length > 0 ? sources : undefined,
+        statData,
+      };
+      onMessagesChange(updated);
+    };
 
     try {
       const response = await fetch('/api/chat', {
@@ -131,7 +161,6 @@ export function ChatInterface({
       }
 
       const sourcesHeader = response.headers.get('X-Search-Results');
-      let sources: Source[] = [];
       if (sourcesHeader) {
         try {
           sources = JSON.parse(decodeURIComponent(sourcesHeader));
@@ -142,7 +171,6 @@ export function ChatInterface({
 
       // 统计问答的图表数据（结构化分组数据，用于渲染柱状图/折线图）
       const statDataHeader = response.headers.get('X-Stat-Data');
-      let statData: StatChartData | undefined;
       if (statDataHeader) {
         try {
           statData = JSON.parse(decodeURIComponent(statDataHeader));
@@ -156,7 +184,6 @@ export function ChatInterface({
 
       const decoder = new TextDecoder();
       let buffer = '';
-      let fullText = '';
       let displayedLen = 0;
       let streamDone = false;
 
@@ -165,21 +192,13 @@ export function ChatInterface({
       typewriter = window.setInterval(() => {
         if (displayedLen >= fullText.length) {
           if (streamDone) {
+            // 全部内容已显示完毕：收尾提交（保留打字机效果，生成完成后继续逐字显示）
             if (typewriter !== null) window.clearInterval(typewriter);
+            abortRef.current = null;
+            stopHandlerRef.current = null;
             flushSync(() => {
               setStreamingText('');
-              onMessagesChange(
-                (() => {
-                  const updated = [...messages];
-                  updated[updated.length - 1] = {
-                    ...updated[updated.length - 1],
-                    content: fullText,
-                    sources: sources.length > 0 ? sources : undefined,
-                    statData,
-                  };
-                  return updated;
-                })()
-              );
+              commitAnswer();
               setIsLoading(false);
             });
           }
@@ -196,7 +215,18 @@ export function ChatInterface({
         setStreamingText(fullText.substring(0, displayedLen));
       }, 50);
 
+      // 注入停止处理器：停止时立即清理打字机并提交已生成内容，无需等待网络中断
+      stopHandlerRef.current = () => {
+        if (typewriter !== null) window.clearInterval(typewriter);
+        abortRef.current = null;
+        setStreamingText('');
+        commitAnswer();
+        setIsLoading(false);
+      };
+
       while (true) {
+        // 用户已点停止：尽快退出读取循环（不依赖网络层 abort 是否生效）
+        if (stoppedRef.current) break;
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -217,19 +247,32 @@ export function ChatInterface({
     } catch (err) {
       // 停止或报错时清理打字机 interval，并清空流式文本
       if (typewriter !== null) window.clearInterval(typewriter);
+      abortRef.current = null;
+      stopHandlerRef.current = null;
       setStreamingText('');
       if (err instanceof DOMException && err.name === 'AbortError') {
-        // user cancelled
+        // 用户主动停止：保留已生成的部分回答（避免整条回答消失变空）
+        if (fullText) {
+          flushSync(() => {
+            commitAnswer();
+          });
+        }
       } else {
         setError(err instanceof Error ? err : new Error(String(err)));
       }
       flushSync(() => setIsLoading(false));
     }
-    abortRef.current = null;
   }, [conversationId, messages, isLoading, onMessagesChange]);
 
   const stop = useCallback(() => {
+    stoppedRef.current = true;
     abortRef.current?.abort();
+    // 立即停止打字机并提交当前已生成的内容，保证"停止"即时生效
+    const handler = stopHandlerRef.current;
+    if (handler) {
+      stopHandlerRef.current = null;
+      handler();
+    }
   }, []);
 
   const handleKeyDown = useCallback(
@@ -335,6 +378,7 @@ export function ChatInterface({
                           ? messages[i - 1].content
                           : undefined
                       }
+                      statData={message.statData}
                       className="mt-1.5"
                     />
                   )}
