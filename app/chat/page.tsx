@@ -171,6 +171,24 @@ export default function ChatPage() {
     [messages.length, activeId]
   );
 
+  /** 提问时自动创建的新会话：设为活跃并插入列表最前 */
+  const handleConversationCreated = useCallback(
+    (conv: {
+      id: string;
+      title: string;
+      created_at: string;
+      updated_at: string;
+    }) => {
+      setActiveId(conv.id);
+      setConversations((prev) =>
+        prev.some((c) => c.id === conv.id)
+          ? prev
+          : [conv as ConversationSummary, ...prev]
+      );
+    },
+    []
+  );
+
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
       <ConversationSidebar
@@ -216,6 +234,7 @@ export default function ChatPage() {
           conversationId={activeId}
           messages={messages}
           onMessagesChange={handleMessagesChange}
+          onConversationCreated={handleConversationCreated}
         />
       </div>
     </div>

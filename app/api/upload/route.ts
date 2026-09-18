@@ -14,6 +14,7 @@
 import { NextRequest } from 'next/server';
 import { parseFile } from '@/lib/file-parsers';
 import { ingestDocument, deleteDocument, getAllDocuments } from '@/lib/rag';
+import { requireAuth, authErrorResponse, AuthError } from '@/lib/auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -65,6 +66,7 @@ function getExtension(filename: string): string {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = requireAuth(req);
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     const replaceId = (formData.get('replaceId') as string | null) || undefined;
@@ -151,13 +153,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 收集待覆盖的旧文档 ID（在新文档入库前记录，避免误删新文档）
+    // 收集待覆盖的旧文档 ID（在新文档入库前记录，避免误删新文档，仅本人文档）
     const replacedIds: string[] = [];
     if (replaceId) {
       replacedIds.push(replaceId);
     } else if (replaceTitle) {
       try {
-        const docs = await getAllDocuments();
+        const docs = await getAllDocuments(user.id);
         for (const d of docs) {
           if (d.title === replaceTitle) replacedIds.push(d.id);
         }
@@ -166,8 +168,9 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 入库（分块 + 生成向量 + 存储）
+    // 入库（分块 + 生成向量 + 存储，归属当前用户）
     const result = await ingestDocument(
+      user.id,
       parsed.text,
       parsed.title,
       parsed.sourceType,
@@ -175,11 +178,11 @@ export async function POST(req: NextRequest) {
       parsed.tableData
     );
 
-    // 新文档入库成功后，再删除旧文档（按 ID 精确删除，避免误删刚入库的新文档）
+    // 新文档入库成功后，再删除旧文档（按 ID 精确删除且校验归属，避免误删他人文档）
     for (const id of replacedIds) {
       if (id === result.documentId) continue;
       try {
-        await deleteDocument(id);
+        await deleteDocument(user.id, id);
       } catch (error) {
         console.error(`Failed to delete replaced document ${id}:`, error);
       }
@@ -195,6 +198,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error('Upload API error:', error);
+    if (error instanceof AuthError) return authErrorResponse();
     const message =
       error instanceof Error ? error.message : '上传处理失败';
     return Response.json({ error: message }, { status: 500 });

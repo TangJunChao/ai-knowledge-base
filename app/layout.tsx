@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { AuthBar } from '@/components/auth/AuthBar';
+import { AuthGate } from '@/components/auth/AuthGate';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -24,29 +26,36 @@ export default function RootLayout({
                 </span>
                 <span>AI 知识库</span>
               </Link>
-              <nav className="flex items-center gap-1">
-                <Link
-                  href="/chat"
-                  className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover transition-colors"
-                >
-                  问答
-                </Link>
-                <Link
-                  href="/history"
-                  className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover transition-colors"
-                >
-                  历史记录
-                </Link>
-                <Link
-                  href="/documents"
-                  className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover transition-colors"
-                >
-                  文档管理
-                </Link>
-              </nav>
+              <div className="flex items-center gap-1">
+                <nav className="flex items-center gap-1">
+                  <Link
+                    href="/chat"
+                    className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover transition-colors"
+                  >
+                    问答
+                  </Link>
+                  <Link
+                    href="/history"
+                    className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover transition-colors"
+                  >
+                    历史记录
+                  </Link>
+                  <Link
+                    href="/documents"
+                    className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover transition-colors"
+                  >
+                    文档管理
+                  </Link>
+                </nav>
+                <div className="ml-2 pl-3 border-l border-border flex items-center">
+                  <AuthBar />
+                </div>
+              </div>
             </div>
           </header>
-          <main className="flex-1">{children}</main>
+          <main className="flex-1">
+            <AuthGate>{children}</AuthGate>
+          </main>
         </div>
       </body>
     </html>

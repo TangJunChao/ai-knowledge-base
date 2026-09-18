@@ -26,6 +26,20 @@ interface ChatInterfaceProps {
   messages: Message[];
   /** 消息变化回调 */
   onMessagesChange: (messages: Message[]) => void;
+  /** 发送时自动创建了新会话（conversationId 为空时），通知父组件更新会话列表 */
+  onConversationCreated?: (conversation: {
+    id: string;
+    title: string;
+    created_at: string;
+    updated_at: string;
+  }) => void;
+}
+
+interface NewConversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
 }
 
 function parseDataLine(line: string): { type: string; value: string } | null {
@@ -46,6 +60,7 @@ export function ChatInterface({
   conversationId,
   messages,
   onMessagesChange,
+  onConversationCreated,
 }: ChatInterfaceProps) {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -123,6 +138,29 @@ export function ChatInterface({
     abortRef.current = controller;
     stoppedRef.current = false;
 
+    // 若当前没有会话（新用户首次提问 / 已删除全部会话），自动创建一个，
+    // 保证问答记录归属到会话，历史记录页（按会话展示）能看到
+    let cid = conversationId;
+    if (!cid) {
+      try {
+        const res = await fetch('/api/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const conv = data?.conversation as NewConversation | undefined;
+          if (conv?.id) {
+            cid = conv.id;
+            onConversationCreated?.(conv);
+          }
+        }
+      } catch {
+        // 创建失败则按无会话继续（记录仍会保存）
+      }
+    }
+
     // 提升作用域，便于停止/报错时清理打字机 interval，避免泄漏
     let typewriter: number | null = null;
 
@@ -150,7 +188,7 @@ export function ChatInterface({
             role: m.role,
             content: m.content,
           })),
-          conversationId,
+          conversationId: cid,
         }),
         signal: controller.signal,
       });
@@ -262,7 +300,7 @@ export function ChatInterface({
       }
       flushSync(() => setIsLoading(false));
     }
-  }, [conversationId, messages, isLoading, onMessagesChange]);
+  }, [conversationId, messages, isLoading, onMessagesChange, onConversationCreated]);
 
   const stop = useCallback(() => {
     stoppedRef.current = true;

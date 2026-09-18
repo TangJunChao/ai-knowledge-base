@@ -1,12 +1,14 @@
 /**
- * 聊天 API - RAG 问答接口
+ * 聊天 API - RAG 问答接口（仅当前登录用户，检索与保存均隔离）
  * 流式返回 AI 回答
  *
  * POST /api/chat
- * Body: { messages: Message[] }
+ * Body: { messages: Message[], conversationId? }
  * Response: SSE stream
  */
 
+import { query } from '@/lib/db';
+import { NextRequest } from 'next/server';
 import {
   retrieveContext,
   ragStream,
@@ -28,13 +30,25 @@ import {
   type StatsResult,
   type LatestRecordResult,
 } from '@/lib/statistics';
+import { requireAuth, authErrorResponse, AuthError } from '@/lib/auth';
 import type { TableData } from '@/lib/file-parsers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST(req: Request) {
+/** 校验会话归属：会话必须属于当前用户（防止在他人会话中写入） */
+async function isOwnConversation(userId: string, conversationId: string): Promise<boolean> {
+  const rows = await query<{ id: string }>(
+    `SELECT id FROM conversations WHERE id = $1 AND user_id = $2`,
+    [conversationId, userId]
+  );
+  return rows.length > 0;
+}
+
+export async function POST(req: NextRequest) {
   try {
+    const user = requireAuth(req);
+
     const body = await req.json();
     const { messages, conversationId } = body as {
       messages: { role: string; content: string }[];
@@ -50,16 +64,22 @@ export async function POST(req: Request) {
       return Response.json({ error: '最后一条消息必须是用户消息' }, { status: 400 });
     }
 
+    // 会话归属校验：若指定会话，必须属于当前用户
+    if (conversationId) {
+      const own = await isOwnConversation(user.id, conversationId);
+      if (!own) {
+        return Response.json({ error: '会话不存在' }, { status: 404 });
+      }
+    }
+
     const question = lastMessage.content;
 
     // 若会话标题仍是默认"新对话"，用首条问题自动命名
     if (conversationId) {
-      autoTitleConversation(conversationId, question).catch(console.error);
+      autoTitleConversation(user.id, conversationId, question).catch(console.error);
     }
 
     // ===== 多轮追问：查询改写 =====
-    // 当存在对话历史时，把追问（如"那2026年呢？"）结合历史改写成独立完整的查询，
-    // 这样统计分支能识别年份/编号/统计意图，RAG 也能检索到正确片段。
     const history = messages.slice(0, -1).filter((m) => m.role === 'user' || m.role === 'assistant');
     let query = question;
     if (history.length >= 2) {
@@ -70,11 +90,8 @@ export async function POST(req: Request) {
     }
 
     // ===== 分支零：最新记录问答 =====
-    // "美味居最新租金多少" 这类"取某对象最新一条记录"的问题，
-    // 不依赖向量检索 Top-K（否则可能只召回一条旧记录），而是遍历结构化表格
-    // 按月份时间排序精确取最新一条。仅在无聚合语义（合计/平均/多少家）时走此分支。
     if (isLatestQuery(query) && !isStatisticalQuery(query)) {
-      const latestAttempt = await tryLatestAnswer(query, history);
+      const latestAttempt = await tryLatestAnswer(user.id, query, history);
       if (latestAttempt) {
         const { result, sources } = latestAttempt;
         const response = result.toDataStreamResponse({
@@ -85,7 +102,7 @@ export async function POST(req: Request) {
         });
         result.text
           .then((text) => {
-            saveChatRecord(conversationId ?? null, question, text, sources).catch(console.error);
+            saveChatRecord(user.id, conversationId ?? null, question, text, sources).catch(console.error);
           })
           .catch(console.error);
         return response;
@@ -94,9 +111,8 @@ export async function POST(req: Request) {
     }
 
     // ===== 分支一：表格统计问答 =====
-    // 统计类问题走结构化表格精确聚合，避免向量检索 Top-K 漏数据
     if (isStatisticalQuery(query)) {
-      const statAttempt = await tryStatisticsAnswer(query, history);
+      const statAttempt = await tryStatisticsAnswer(user.id, query, history);
       if (statAttempt) {
         const { result, docTitle, sources, chart } = statAttempt;
         const response = result.toDataStreamResponse({
@@ -109,7 +125,7 @@ export async function POST(req: Request) {
         });
         result.text
           .then((text) => {
-            saveChatRecord(conversationId ?? null, question, text, sources, chart).catch(console.error);
+            saveChatRecord(user.id, conversationId ?? null, question, text, sources, chart).catch(console.error);
           })
           .catch(console.error);
         return response;
@@ -117,8 +133,8 @@ export async function POST(req: Request) {
       // 统计失败则回退到普通 RAG
     }
 
-    // ===== 分支二：普通 RAG 问答 =====
-    const results = await retrieveContext(query);
+    // ===== 分支二：普通 RAG 问答（仅检索当前用户文档）=====
+    const results = await retrieveContext(user.id, query);
     const result = await ragStream(query, results, history);
 
     const sources = results.map((r) => ({
@@ -141,13 +157,14 @@ export async function POST(req: Request) {
 
     result.text
       .then((text) => {
-        saveChatRecord(conversationId ?? null, question, text, sources).catch(console.error);
+        saveChatRecord(user.id, conversationId ?? null, question, text, sources).catch(console.error);
       })
       .catch(console.error);
 
     return response;
   } catch (error) {
     console.error('Chat API error:', error);
+    if (error instanceof AuthError) return authErrorResponse();
     const message = error instanceof Error ? error.message : String(error);
     return Response.json(
       { error: '服务器内部错误', detail: message },
@@ -157,15 +174,14 @@ export async function POST(req: Request) {
 }
 
 /**
- * 尝试对"最新记录"类问题执行程序化查询。
- * 遍历所有结构化文档，取指定对象时间上最新一条；多文档命中时选时间最新的结果。
- * 成功返回流式结果 + 来源；失败返回 null（回退统计 / RAG）。
+ * 尝试对"最新记录"类问题执行程序化查询（仅当前用户文档）。
  */
 async function tryLatestAnswer(
+  userId: string,
   question: string,
   history?: { role: string; content: string }[]
 ) {
-  const tableDocs = await getTableDocuments();
+  const tableDocs = await getTableDocuments(userId);
   if (tableDocs.length === 0) return null;
 
   const years = extractYears(question);
@@ -179,7 +195,7 @@ async function tryLatestAnswer(
       if (!docYears.some((y) => years.includes(y))) continue;
     }
 
-    const tableData = (await getDocumentTableData(doc.id)) as TableData | null;
+    const tableData = (await getDocumentTableData(userId, doc.id)) as TableData | null;
     if (!tableData || !Array.isArray(tableData) || tableData.length === 0) continue;
 
     const latest = computeLatestRecord(tableData, question);
@@ -207,15 +223,15 @@ async function tryLatestAnswer(
 }
 
 /**
- * 尝试对统计类问题执行结构化表格统计。
- * 成功返回流式结果 + 来源；失败返回 null（回退普通 RAG）。
+ * 尝试对统计类问题执行结构化表格统计（仅当前用户文档）。
  */
 async function tryStatisticsAnswer(
+  userId: string,
   question: string,
   history?: { role: string; content: string }[]
 ) {
   // 1. 找出所有带结构化表格数据的文档
-  const tableDocs = await getTableDocuments();
+  const tableDocs = await getTableDocuments(userId);
   if (tableDocs.length === 0) return null;
 
   // 2. 计算涉及年份与标题中的年份
@@ -232,7 +248,7 @@ async function tryStatisticsAnswer(
       if (!overlap) continue;
     }
 
-    const tableData = (await getDocumentTableData(doc.id)) as TableData | null;
+    const tableData = (await getDocumentTableData(userId, doc.id)) as TableData | null;
     if (!tableData || !Array.isArray(tableData) || tableData.length === 0) continue;
 
     const stats = computeStatistics(tableData, question);

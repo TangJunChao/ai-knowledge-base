@@ -10,7 +10,7 @@
 
 import { createOpenAI } from '@ai-sdk/openai';
 import { streamText } from 'ai';
-import { query, withTransaction, DocumentRecord, ChunkRecord } from './db';
+import { query, execute, withTransaction, DocumentRecord, ChunkRecord } from './db';
 import { generateEmbedding, toPgVector, generateEmbeddings } from './embeddings';
 import { chunkText } from './chunking';
 import type { StatsResult, LatestRecordResult } from './statistics';
@@ -71,14 +71,17 @@ const CHUNK_SELECT = `SELECT
  JOIN documents d ON d.id = dc.document_id
  WHERE dc.embedding IS NOT NULL`;
 
+// 仅检索当前用户自己的文档（多用户隔离）
 const VECTOR_SQL = `${CHUNK_SELECT}
+   AND d.user_id = $2
  ORDER BY dc.embedding <=> $1::vector
- LIMIT $2`;
+ LIMIT $3`;
 
 const KEYWORD_SQL = `${CHUNK_SELECT}
-   AND dc.content ILIKE ANY($3::text[])
+   AND d.user_id = $2
+   AND dc.content ILIKE ANY($4::text[])
  ORDER BY dc.embedding <=> $1::vector
- LIMIT $2`;
+ LIMIT $3`;
 
 /**
  * 从查询中提取适合精确匹配的字面编号（如 A101、C1C2、609）。
@@ -107,6 +110,7 @@ export function extractLiteralTokens(userQuery: string): string[] {
  * 混合检索：向量相似度 + 字面编号关键词
  */
 export async function retrieveContext(
+  userId: string,
   userQuery: string,
   topK: number = TOP_K
 ): Promise<SearchResult[]> {
@@ -114,7 +118,11 @@ export async function retrieveContext(
   const vectorStr = toPgVector(queryEmbedding);
 
   // 1. 向量检索
-  const vectorResults = await query<ChunkRow>(VECTOR_SQL, [vectorStr, topK]);
+  const vectorResults = await query<ChunkRow>(VECTOR_SQL, [
+    vectorStr,
+    userId,
+    topK,
+  ]);
 
   // 2. 关键词检索：把查询中的编号/铺位号精确匹配回来
   const tokens = extractLiteralTokens(userQuery);
@@ -124,6 +132,7 @@ export async function retrieveContext(
     try {
       keywordResults = await query<ChunkRow>(KEYWORD_SQL, [
         vectorStr,
+        userId,
         KEYWORD_TOP_K,
         patterns,
       ]);
@@ -413,6 +422,7 @@ export async function latestStream(
  * 完整的文档入库流程：解析 -> 分块 -> 生成向量 -> 存入数据库
  */
 export async function ingestDocument(
+  userId: string,
   text: string,
   title: string,
   sourceType: string,
@@ -430,10 +440,11 @@ export async function ingestDocument(
   return withTransaction(async (client) => {
     // 插入文档记录
     const docResult = await client.query<{ id: string }>(
-      `INSERT INTO documents (title, source_type, content, table_data, chunk_count, file_size)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+      `INSERT INTO documents (user_id, title, source_type, content, table_data, chunk_count, file_size)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
        RETURNING id`,
       [
+        userId,
         title,
         sourceType,
         text,
@@ -462,43 +473,60 @@ export async function ingestDocument(
 }
 
 /**
- * 获取所有文档列表
+ * 获取当前用户的文档列表
  */
-export async function getAllDocuments(): Promise<DocumentRecord[]> {
+export async function getAllDocuments(userId: string): Promise<DocumentRecord[]> {
   return query<DocumentRecord>(
     `SELECT id, title, source_type, content, chunk_count, created_at
      FROM documents
-     ORDER BY created_at DESC`
+     WHERE user_id = $1
+     ORDER BY created_at DESC`,
+    [userId]
   );
 }
 
 /**
- * 删除文档及其所有分块
+ * 删除文档及其所有分块（仅限本人文档，防止误删他人）
+ * @returns 是否删除了文档（非本人文档返回 false）
  */
-export async function deleteDocument(documentId: string): Promise<void> {
-  await query(`DELETE FROM documents WHERE id = $1`, [documentId]);
+export async function deleteDocument(
+  userId: string,
+  documentId: string
+): Promise<boolean> {
+  const affected = await execute(
+    `DELETE FROM documents WHERE id = $1 AND user_id = $2`,
+    [documentId, userId]
+  );
+  return affected > 0;
 }
 
 /**
- * 获取文档的分块内容（用于查看详情）
+ * 获取文档的分块内容（用于查看详情，校验归属）
  */
-export async function getDocumentChunks(documentId: string): Promise<ChunkRecord[]> {
+export async function getDocumentChunks(
+  userId: string,
+  documentId: string
+): Promise<ChunkRecord[]> {
   return query<ChunkRecord>(
-    `SELECT id, document_id, content, chunk_index
-     FROM document_chunks
-     WHERE document_id = $1
-     ORDER BY chunk_index ASC`,
-    [documentId]
+    `SELECT dc.id, dc.document_id, dc.content, dc.chunk_index
+     FROM document_chunks dc
+     JOIN documents d ON d.id = dc.document_id
+     WHERE dc.document_id = $1 AND d.user_id = $2
+     ORDER BY dc.chunk_index ASC`,
+    [documentId, userId]
   );
 }
 
 /**
- * 获取单个文档的结构化表格数据（table_data）
+ * 获取单个文档的结构化表格数据（table_data，校验归属）
  */
-export async function getDocumentTableData(documentId: string): Promise<unknown | null> {
+export async function getDocumentTableData(
+  userId: string,
+  documentId: string
+): Promise<unknown | null> {
   const rows = await query<{ table_data: unknown }>(
-    `SELECT table_data FROM documents WHERE id = $1`,
-    [documentId]
+    `SELECT table_data FROM documents WHERE id = $1 AND user_id = $2`,
+    [documentId, userId]
   );
   if (rows.length === 0) return null;
   const raw = rows[0].table_data;
@@ -508,35 +536,42 @@ export async function getDocumentTableData(documentId: string): Promise<unknown 
 }
 
 /**
- * 获取所有带结构化表格数据的文档（用于跨表统计）
+ * 获取当前用户所有带结构化表格数据的文档（用于跨表统计）
  */
-export async function getTableDocuments(): Promise<
+export async function getTableDocuments(userId: string): Promise<
   { id: string; title: string }[]
 > {
   return query<{ id: string; title: string }>(
-    `SELECT id, title FROM documents WHERE table_data IS NOT NULL ORDER BY created_at DESC`
+    `SELECT id, title FROM documents WHERE table_data IS NOT NULL AND user_id = $1 ORDER BY created_at DESC`,
+    [userId]
   );
 }
 
 /**
- * 获取对话历史
+ * 获取当前用户的对话历史
  */
-export async function getChatHistory(limit: number = 20): Promise<any[]> {
+export async function getChatHistory(
+  userId: string,
+  limit: number = 20
+): Promise<any[]> {
   return query(
     `SELECT id, conversation_id, question, answer, sources, stat_data, created_at
      FROM chat_history
+     WHERE user_id = $1
      ORDER BY created_at DESC
-     LIMIT $1`,
-    [limit]
+     LIMIT $2`,
+    [userId, limit]
   );
 }
 
 /**
  * 保存对话记录
+ * @param userId 所属用户
  * @param conversationId 所属会话 ID（多会话；为空则不入库会话关联）
  * @param statData 统计问答的图表数据（可选，仅统计分支传入）
  */
 export async function saveChatRecord(
+  userId: string,
   conversationId: string | null,
   question: string,
   answer: string,
@@ -544,9 +579,10 @@ export async function saveChatRecord(
   statData?: unknown
 ): Promise<void> {
   await query(
-    `INSERT INTO chat_history (conversation_id, question, answer, sources, stat_data)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
+    `INSERT INTO chat_history (user_id, conversation_id, question, answer, sources, stat_data)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
     [
+      userId,
       conversationId,
       question,
       answer,
@@ -554,27 +590,33 @@ export async function saveChatRecord(
       statData ? JSON.stringify(statData) : null,
     ]
   );
-  // 更新会话的"最后活动时间"（会话列表按此倒序）
+  // 更新会话的"最后活动时间"（会话列表按此倒序，仅本人会话）
   if (conversationId) {
     await query(
-      `UPDATE conversations SET updated_at = NOW() WHERE id = $1`,
-      [conversationId]
+      `UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND user_id = $2`,
+      [conversationId, userId]
     );
   }
 }
 
 /**
- * 删除单条对话记录
+ * 删除单条对话记录（仅本人）
  */
-export async function deleteChatHistory(id: string): Promise<void> {
-  await query(`DELETE FROM chat_history WHERE id = $1`, [id]);
+export async function deleteChatHistory(
+  userId: string,
+  id: string
+): Promise<void> {
+  await query(`DELETE FROM chat_history WHERE id = $1 AND user_id = $2`, [
+    id,
+    userId,
+  ]);
 }
 
 /**
- * 清空所有对话记录
+ * 清空当前用户的对话记录
  */
-export async function clearAllChatHistory(): Promise<void> {
-  await query(`DELETE FROM chat_history`);
+export async function clearAllChatHistory(userId: string): Promise<void> {
+  await query(`DELETE FROM chat_history WHERE user_id = $1`, [userId]);
 }
 
 /* ==================== 多会话管理 ==================== */
@@ -599,9 +641,11 @@ export interface ConversationMessage {
 }
 
 /**
- * 会话列表（按最后活动时间倒序），含消息数与最后一条问题预览
+ * 当前用户的会话列表（按最后活动时间倒序），含消息数与最后一条问题预览
  */
-export async function listConversations(): Promise<ConversationSummary[]> {
+export async function listConversations(
+  userId: string
+): Promise<ConversationSummary[]> {
   return query<ConversationSummary>(
     `SELECT
        c.id,
@@ -613,20 +657,25 @@ export async function listConversations(): Promise<ConversationSummary[]> {
        c.updated_at
      FROM conversations c
      LEFT JOIN chat_history h ON h.conversation_id = c.id
+     WHERE c.user_id = $1
      GROUP BY c.id
-     ORDER BY COALESCE(MAX(h.created_at), c.created_at) DESC`
+     ORDER BY COALESCE(MAX(h.created_at), c.created_at) DESC`,
+    [userId]
   );
 }
 
 /**
  * 新建会话
  */
-export async function createConversation(title?: string): Promise<ConversationSummary> {
+export async function createConversation(
+  userId: string,
+  title?: string
+): Promise<ConversationSummary> {
   const rows = await query<ConversationSummary>(
-    `INSERT INTO conversations (title) VALUES ($1)
+    `INSERT INTO conversations (user_id, title) VALUES ($1, $2)
      RETURNING id, title, 0::int AS message_count, created_at, updated_at,
                NULL::timestamptz AS last_message_at, NULL::text AS last_question`,
-    [title?.trim() || '新对话']
+    [userId, title?.trim() || '新对话']
   );
   return rows[0];
 }
@@ -635,6 +684,7 @@ export async function createConversation(title?: string): Promise<ConversationSu
  * 会话详情：基本信息 + 全部消息（按时间正序，便于直接渲染对话流）
  */
 export async function getConversationWithMessages(
+  userId: string,
   conversationId: string
 ): Promise<{ conversation: ConversationSummary | null; messages: ConversationMessage[] } | null> {
   const convRows = await query<ConversationSummary>(
@@ -648,41 +698,52 @@ export async function getConversationWithMessages(
        c.updated_at
      FROM conversations c
      LEFT JOIN chat_history h ON h.conversation_id = c.id
-     WHERE c.id = $1
+     WHERE c.id = $1 AND c.user_id = $2
      GROUP BY c.id`,
-    [conversationId]
+    [conversationId, userId]
   );
   if (convRows.length === 0) return null;
 
   const msgRows = await query<ConversationMessage>(
     `SELECT id, question, answer, sources, stat_data, created_at
      FROM chat_history
-     WHERE conversation_id = $1
+     WHERE conversation_id = $1 AND user_id = $2
      ORDER BY created_at ASC`,
-    [conversationId]
+    [conversationId, userId]
   );
 
   return { conversation: convRows[0], messages: msgRows };
 }
 
 /**
- * 删除会话（级联删除其下所有消息）
+ * 删除会话（级联删除其下所有消息，仅本人）
+ * @returns 是否删除了会话（非本人会话返回 false）
  */
-export async function deleteConversation(conversationId: string): Promise<void> {
-  await query(`DELETE FROM conversations WHERE id = $1`, [conversationId]);
+export async function deleteConversation(
+  userId: string,
+  conversationId: string
+): Promise<boolean> {
+  const affected = await execute(
+    `DELETE FROM conversations WHERE id = $1 AND user_id = $2`,
+    [conversationId, userId]
+  );
+  return affected > 0;
 }
 
 /**
- * 重命名会话
+ * 重命名会话（仅本人）
+ * @returns 是否重命名成功（非本人会话返回 false）
  */
 export async function renameConversation(
+  userId: string,
   conversationId: string,
   title: string
-): Promise<void> {
-  await query(`UPDATE conversations SET title = $2 WHERE id = $1`, [
-    conversationId,
-    title.trim() || '新对话',
-  ]);
+): Promise<boolean> {
+  const affected = await execute(
+    `UPDATE conversations SET title = $3 WHERE id = $1 AND user_id = $2`,
+    [conversationId, userId, title.trim() || '新对话']
+  );
+  return affected > 0;
 }
 
 /**
@@ -690,15 +751,16 @@ export async function renameConversation(
  * @returns 是否执行了命名
  */
 export async function autoTitleConversation(
+  userId: string,
   conversationId: string,
   question: string
 ): Promise<boolean> {
   const rows = await query<{ is_default: boolean }>(
-    `SELECT (title = '新对话' OR title = '') AS is_default FROM conversations WHERE id = $1`,
-    [conversationId]
+    `SELECT (title = '新对话' OR title = '') AS is_default FROM conversations WHERE id = $1 AND user_id = $2`,
+    [conversationId, userId]
   );
   if (rows.length === 0 || !rows[0].is_default) return false;
   const title = question.replace(/\s+/g, ' ').trim().slice(0, 30);
-  await renameConversation(conversationId, title || '新对话');
+  await renameConversation(userId, conversationId, title || '新对话');
   return true;
 }

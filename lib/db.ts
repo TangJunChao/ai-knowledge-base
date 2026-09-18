@@ -34,6 +34,20 @@ export async function query<T extends Record<string, any>>(
   }
 }
 
+/** 执行写操作，返回受影响行数（用于判断是否存在/是否生效） */
+export async function execute(
+  text: string,
+  params?: QueryParam[]
+): Promise<number> {
+  const client = await getPool().connect();
+  try {
+    const result = await client.query(text, params);
+    return result.rowCount ?? 0;
+  } finally {
+    client.release();
+  }
+}
+
 export async function withTransaction<T>(
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {

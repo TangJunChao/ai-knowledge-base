@@ -17,9 +17,19 @@ const schema = `
 -- 启用 pgvector 扩展
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- 用户表（登录与多用户隔离）
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  username VARCHAR(50) NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role VARCHAR(20) NOT NULL DEFAULT 'user',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- 文档表
 CREATE TABLE IF NOT EXISTS documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   title VARCHAR(500) NOT NULL,
   source_type VARCHAR(50) NOT NULL DEFAULT 'text',
   content TEXT NOT NULL,
@@ -44,6 +54,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 -- 会话表（多会话管理）
 CREATE TABLE IF NOT EXISTS conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   title VARCHAR(200) NOT NULL DEFAULT '新对话',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -52,6 +63,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 -- 对话历史表（归属会话）
 CREATE TABLE IF NOT EXISTS chat_history (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
   answer TEXT NOT NULL,
@@ -84,6 +96,11 @@ CREATE INDEX IF NOT EXISTS conversations_updated_at_idx
 -- 历史记录按会话查询索引
 CREATE INDEX IF NOT EXISTS chat_history_conversation_id_idx
   ON chat_history(conversation_id, created_at);
+
+-- 用户隔离查询索引
+CREATE INDEX IF NOT EXISTS documents_user_id_idx ON documents(user_id);
+CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS chat_history_user_id_idx ON chat_history(user_id);
 `;
 
 /** 等待数据库可用（最多 maxAttempts 次，每次间隔 2 秒） */
