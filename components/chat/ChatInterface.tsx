@@ -336,7 +336,7 @@ export function ChatInterface({
   );
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)]">
+    <div className="flex flex-col h-[calc(100vh-6.1rem)]">
       <div className="flex-1 overflow-y-auto" ref={scrollRef} onScroll={handleScroll}>
         <div className="max-w-3xl mx-auto px-4 py-6">
           {messages.length === 0 && (
