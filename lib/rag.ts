@@ -9,7 +9,7 @@
  */
 
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText } from 'ai';
+import { generateText, streamText } from 'ai';
 import { query, execute, withTransaction, DocumentRecord, ChunkRecord } from './db';
 import { generateEmbedding, toPgVector, generateEmbeddings } from './embeddings';
 import { chunkText } from './chunking';
@@ -202,13 +202,14 @@ ${transcript}
   try {
     const text = await Promise.race([
       (async () => {
-        const result = await streamText({
+        // 用 generateText 一次性取完整改写结果：await result.text 在部分环境下会挂起导致超时
+        const { text } = await generateText({
           model: openai(CHAT_MODEL),
           prompt,
           temperature: 0,
           maxTokens: 200,
         });
-        return await result.text;
+        return text;
       })(),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('改写请求超时（15s）')), 15000)

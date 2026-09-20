@@ -17,6 +17,8 @@ export interface Message {
   content: string;
   sources?: Source[];
   statData?: StatChartData;
+  /** 回答完成后由模型生成的 2-3 个相关追问建议 */
+  suggestions?: string[];
 }
 
 interface ChatInterfaceProps {
@@ -107,6 +109,39 @@ export function ChatInterface({
         Math.min(textareaRef.current.scrollHeight, 200) + 'px';
     }
   }, [input]);
+
+  /** 回答完整生成后，请求 2-3 个相关追问建议并附加到最后一条助手消息（失败静默） */
+  const requestSuggestions = useCallback(
+    async (question: string, answer: string) => {
+      try {
+        const res = await fetch('/api/chat/suggestions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, answer }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = Array.isArray(data?.suggestions)
+          ? data.suggestions.filter(
+              (s: unknown): s is string => typeof s === 'string' && s.trim().length > 0
+            )
+          : [];
+        if (list.length === 0) return;
+
+        const updated = [...messagesRef.current];
+        if (updated.length === 0) return;
+        const last = updated[updated.length - 1];
+        // 仅在最后一条仍是本轮回答时附加建议（防止用户已发送新问题导致错位）
+        if (last.role === 'assistant' && last.content === answer) {
+          updated[updated.length - 1] = { ...last, suggestions: list.slice(0, 3) };
+          onMessagesChange(updated);
+        }
+      } catch {
+        // 静默失败：建议是增强功能，不影响主流程
+      }
+    },
+    [onMessagesChange]
+  );
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isLoading) return;
@@ -239,6 +274,8 @@ export function ChatInterface({
               commitAnswer();
               setIsLoading(false);
             });
+            // 回答完整生成后，请求 2-3 个相关追问建议（失败静默，不影响主流程）
+            requestSuggestions(text, fullText);
           }
           return;
         }
@@ -300,7 +337,7 @@ export function ChatInterface({
       }
       flushSync(() => setIsLoading(false));
     }
-  }, [conversationId, messages, isLoading, onMessagesChange, onConversationCreated]);
+  }, [conversationId, messages, isLoading, onMessagesChange, onConversationCreated, requestSuggestions]);
 
   const stop = useCallback(() => {
     stoppedRef.current = true;
@@ -404,6 +441,23 @@ export function ChatInterface({
                         <MessageRenderer content={message.content} />
                         {message.statData && <StatChart data={message.statData} />}
                         {message.sources && <SourceCard sources={message.sources} />}
+                        {message.suggestions && message.suggestions.length > 0 && (
+                          <div className="mt-3 pt-3 border-t border-border">
+                            <div className="text-xs text-muted mb-2">继续追问</div>
+                            <div className="flex flex-col gap-2">
+                              {message.suggestions.map((s) => (
+                                <button
+                                  key={s}
+                                  onClick={() => sendMessage(s)}
+                                  disabled={isLoading}
+                                  className="text-left text-sm px-3 py-2 rounded-xl border border-border bg-background hover:border-primary hover:bg-surface-hover transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  {s}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
