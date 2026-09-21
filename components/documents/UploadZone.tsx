@@ -458,8 +458,8 @@ export function UploadZone({ onUploadSuccess }: UploadZoneProps) {
         ))}
       </div>
       <p className="text-xs text-muted mt-2 px-1 leading-relaxed">
-        不支持图片、音视频、压缩包等格式；旧版 Word（.doc）请另存为 .docx；扫描版 PDF
-        需先转为可复制文本。
+        不支持直接上传图片、音视频、压缩包等格式；文档内嵌图片可在启用 OCR 后自动识别文字；
+        旧版 Word（.doc）请另存为 .docx；扫描版 PDF 可开启 OCR（ENABLE_OCR=1）自动识别。
       </p>
     </div>
   );

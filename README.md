@@ -11,7 +11,7 @@
 - 多轮追问：结合对话历史自动改写查询，支持"那 2026 年呢？"这类追问
 - 追问建议：回答完成后自动推荐 2-3 个相关追问，点击即可继续深入提问
 - 多会话管理：左侧会话栏支持新建 / 切换 / 删除 / 重命名会话，首条问题自动命名，历史按会话分组展示，活跃会话自动置顶
-- 文档管理：支持 PDF / Word / Excel / CSV / Markdown / TXT / HTML 上传、覆盖更新、删除（均带二次确认）
+- 文档管理：支持 PDF / Word / Excel / CSV / Markdown / TXT / HTML 上传、覆盖更新、删除（均带二次确认）；可选 OCR（ENABLE_OCR=1）自动识别 PDF / Word / Excel 内图片文字
 - 流式输出：打字机效果，可随时停止（已生成内容保留不丢失），生成过程中实时渲染 Markdown，可向上滚动查看历史
 - 答案导出：一键复制 Markdown / 导出 .md / 导出 PDF 文件；统计问答的柱状图可一并导出（PDF 内嵌图表，MD 附数据表格与图表图片）
 
@@ -81,6 +81,9 @@ npm run dev
 | `KEYWORD_TOP_K` | 关键词检索补充片段数 | `30` |
 | `MAX_CONTEXT_CHUNKS` | 送入模型的最大片段数 | `30` |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | 仅在网络代理拦截证书时设 `0` | 未设置 |
+| `ENABLE_OCR` | 开启 OCR 图片文字识别（PDF/Word/Excel 内图片转文字，见下方说明） | 未设置 |
+| `OCR_MAX_IMAGES` | 单文档最多 OCR 的图片数 | `20` |
+| `OCR_MAX_PIXELS` | 单张图片渲染像素上限，超限跳过 | `9000000` |
 
 ## 使用示例
 
@@ -107,6 +110,7 @@ npm run dev
 │   ├── suggestions.ts    # 追问建议生成
 │   ├── statistics.ts     # 统计引擎与最新记录查询
 │   ├── file-parsers.ts   # PDF / Word / Excel 解析（结构化表格）
+│   ├── ocr.ts            # 可选 OCR：PDF 页面渲染 / Word·Excel 图片提取 + 文字识别
 │   ├── chunking.ts       # 行级分块（不切断表格记录）
 │   └── embeddings.ts     # 本地向量模型
 ├── scripts/              # 数据库初始化、模型预下载、迁移脚本

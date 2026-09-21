@@ -3,6 +3,8 @@
  * 支持解析 PDF、Word、Markdown、TXT 等格式
  */
 
+import { ocrPdfImages, ocrDocxImages, ocrXlsxImages, ocrEnabled } from './ocr';
+
 /** 单个工作表的结构化数据 */
 export interface TableSheetData {
   /** 工作表名称 */
@@ -87,16 +89,36 @@ export async function parseFile(
   let tableData: TableData | undefined;
 
   switch (sourceType) {
-    case 'pdf':
+    case 'pdf': {
       text = await parsePDF(buffer);
+      // 可选 OCR：渲染含图片的页面识别其中文字（仅 ENABLE_OCR=1 时启用）
+      if (ocrEnabled()) {
+        const ocrPages = await ocrPdfImages(buffer);
+        if (ocrPages.length > 0) {
+          text +=
+            '\n\n' + ocrPages.map((p) => `[第${p.pageNo}页图片文字]\n${p.text}`).join('\n\n');
+        }
+      }
       break;
-    case 'docx':
+    }
+    case 'docx': {
       text = await parseDocx(buffer);
+      // 可选 OCR：提取内嵌图片识别其中文字
+      if (ocrEnabled()) {
+        const ocrText = await ocrDocxImages(buffer);
+        if (ocrText) text += `\n\n[文档图片文字]\n${ocrText}`;
+      }
       break;
+    }
     case 'xlsx': {
       const parsed = await parseXlsx(buffer);
       text = parsed.text;
       tableData = parsed.table;
+      // 可选 OCR：提取内嵌图片识别其中文字
+      if (ocrEnabled()) {
+        const ocrText = await ocrXlsxImages(buffer);
+        if (ocrText) text += `\n\n[文档图片文字]\n${ocrText}`;
+      }
       break;
     }
     case 'markdown':
@@ -119,9 +141,40 @@ export async function parseFile(
 }
 
 async function parsePDF(buffer: Buffer): Promise<string> {
-  const pdfParse = (await import('pdf-parse')).default;
-  const data = await pdfParse(buffer);
-  return data.text;
+  // 统一使用 pdfjs-dist v6 提取文本层（pdf-parse 依赖未声明的旧版 pdfjs-dist，
+  // 与新装 v6 冲突；v6 的 getTextContent 提取效果等价且更可控）
+  const pdfjs = (await import('pdfjs-dist/legacy/build/pdf.mjs')) as {
+    getDocument: (opts: Record<string, unknown>) => {
+      promise: Promise<{
+        numPages: number;
+        getPage: (n: number) => Promise<{
+          getTextContent: () => Promise<{ items: { str?: string; hasEOL?: boolean }[] }>;
+        }>;
+      }>;
+      destroy: () => Promise<void>;
+    };
+  };
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer) });
+  const doc = await loadingTask.promise;
+  const parts: string[] = [];
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      const content = await page.getTextContent();
+      let line = '';
+      for (const item of content.items) {
+        if (item.str) line += item.str;
+        if (item.hasEOL) {
+          if (line.trim()) parts.push(line.trim());
+          line = '';
+        }
+      }
+      if (line.trim()) parts.push(line.trim());
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  return parts.join('\n\n');
 }
 
 async function parseDocx(buffer: Buffer): Promise<string> {

@@ -2,7 +2,8 @@
 # 知识库问答系统 - Docker 镜像
 # 多阶段构建：依赖 → 构建 + 模型缓存 → 运行时
 # ==============================================
-FROM node:20-slim AS base
+# Node 22 LTS：pdfjs-dist v6（OCR 用）要求 Node >= 22.13
+FROM node:22-slim AS base
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 

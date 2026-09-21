@@ -1,7 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ['pg', 'pdf-parse', 'mammoth', '@xenova/transformers', 'onnxruntime-node'],
+    serverComponentsExternalPackages: [
+      'pg', 'mammoth', '@xenova/transformers', 'onnxruntime-node',
+      'tesseract.js', '@napi-rs/canvas', 'pdfjs-dist', 'adm-zip',
+    ],
   },
 };
 
