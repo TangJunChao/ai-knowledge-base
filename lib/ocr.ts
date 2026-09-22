@@ -43,6 +43,9 @@ function getWorker(): Promise<Worker> {
     workerPromise = createWorker(['chi_sim', 'eng'], 1, {
       langPath: langDataDir(),
       gzip: false,
+      // tesseract.js 读取语言包后会写入 cachePath（默认当前工作目录，会污染项目根目录），
+      // 这里指回语言包目录：内容相同覆盖写，避免在根目录生成 .traineddata 副本
+      cachePath: langDataDir(),
     });
   }
   return workerPromise;

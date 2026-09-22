@@ -42,6 +42,9 @@ next-env.d.ts
 # 调试日志
 /debug.log
 
+# OCR 语言包仅以 scripts/lang-data 为唯一来源（根目录副本是 tesseract.js 旧版行为的产物）
+/*.traineddata
+
 # TRAE 工具产物与交付文档
 /.trae-html-share-packages/
 /换电脑快速上手/
